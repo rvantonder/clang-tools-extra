@@ -45,11 +45,21 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Signals.h"
+#include "clang/Basic/DiagnosticOptions.h"
+#include "clang/Frontend/TextDiagnosticPrinter.h"
+#include "clang/Basic/FileManager.h"
+#include "clang/Basic/SourceManager.h"
+#include "clang/Rewrite/Core/Rewriter.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace clang::ast_matchers;
 using namespace clang::tooling;
 using namespace llvm;
+
+StatementMatcher LoopMatcher =
+  forStmt(hasLoopInit(declStmt(hasSingleDecl(varDecl(
+    hasInitializer(integerLiteral(equals(0)))))))).bind("forLoop");
 
 namespace {
 class ToolTemplateCallback : public MatchFinder::MatchCallback {
@@ -62,7 +72,18 @@ public:
     // find.
     // At this point, you can examine the match, and do whatever you want,
     // including replacing the matched text with other text
-    (void)Replace; // This to prevent an "unused member variable" warning;
+    if (const ForStmt *FS = Result.Nodes.getNodeAs<clang::ForStmt>("forLoop")) {
+      FS->dump(); // dumps the ENTIRE for statement
+      Replacement Rep(*(Result.SourceManager), FS->getLocStart(), 0,
+                     "// for comment\n");
+
+      Replacements Reps(Rep);
+      std::string s1 ("/tmp/simple-loops.cc");
+      Replace->insert(std::pair<std::string,Replacements>(s1,Reps));
+      // Replace->insert(add(Rep); // add replacement
+    }
+
+    // (void)Replace; // This to prevent an "unused member variable" warning;
   }
 
 private:
@@ -83,8 +104,32 @@ int main(int argc, const char **argv) {
   ToolTemplateCallback Callback(&Tool.getReplacements());
 
   // TODO: Put your matchers here.
-  // Use Finder.addMatcher(...) to define the patterns in the AST that you
+  Finder.addMatcher(LoopMatcher, &Callback); // Use Find.addMatcher(...) to
+                                            // define the patterns in the AST
+                                            // that you
   // want to match against. You are not limited to just one matcher!
 
-  return Tool.run(newFrontendActionFactory(&Finder).get());
+  int ret = Tool.run(newFrontendActionFactory(&Finder).get());
+
+  LangOptions DefaultLangOptions;
+  IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts = new DiagnosticOptions();
+  TextDiagnosticPrinter DiagnosticPrinter(errs(), &*DiagOpts);
+  DiagnosticsEngine Diagnostics(
+        IntrusiveRefCntPtr<DiagnosticIDs>(new DiagnosticIDs()), &*DiagOpts,
+        &DiagnosticPrinter, false);
+  auto &FileMgr = Tool.getFiles();
+  SourceManager Sources(Diagnostics, FileMgr);
+  Rewriter Rewrite(Sources, DefaultLangOptions);
+
+  auto Files = OptionsParser.getSourcePathList();
+
+  Tool.applyAllReplacements(Rewrite);
+
+  for (const auto &File : Files) {
+    const auto *Entry = FileMgr.getFile(File);
+    const auto ID = Sources.getOrCreateFileID(Entry, SrcMgr::C_User);
+    Rewrite.getEditBuffer(ID).write(outs());
+  }
+
+  return ret;
 }
